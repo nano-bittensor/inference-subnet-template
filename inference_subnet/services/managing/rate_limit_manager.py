@@ -32,7 +32,7 @@ class RateLimitManager:
             eligible_nodes = [
                 node
                 for node in nodes
-                if node.get("stake", 0) >= SETTINGS.query.rate_limit_min_stake
+                if node.get("stake", 0) >= SETTINGS.managing.rate_limit_min_stake
             ]
 
             if not eligible_nodes:
@@ -48,14 +48,14 @@ class RateLimitManager:
                 hotkey = node.get("hotkey")
                 stake = node.get("stake", 0)
                 rate_limit = int(
-                    SETTINGS.query.rate_limit_max_requests * (stake / total_stake)
+                    SETTINGS.managing.rate_limit_max_requests * (stake / total_stake)
                 )
                 rate_limits[hotkey] = max(1, rate_limit)  # Ensure minimum of 1
             logger.info(f"Rate limits: {rate_limits}")
             # Store in Redis
             redis_key = "rate_limits:validators"
             await self.redis.set(redis_key, json.dumps(rate_limits))
-            await self.redis.expire(redis_key, SETTINGS.query.epoch_interval * 2)
+            await self.redis.expire(redis_key, SETTINGS.managing.epoch_interval * 2)
 
             logger.info(f"Updated validator rate limits for {len(rate_limits)} nodes")
         except Exception as e:
@@ -87,7 +87,7 @@ class RateLimitManager:
                         "Failed to get validator rate limits even after update"
                     )
                     return (
-                        SETTINGS.query.rate_limit_max_requests // 100
+                        SETTINGS.managing.rate_limit_max_requests // 100
                     )  # Default to a small value
 
             rate_limits = json.loads(rate_limits_json)
@@ -109,7 +109,7 @@ class RateLimitManager:
         Returns:
             Number of requests consumed in the current epoch
         """
-        current_epoch = int(time.time() // SETTINGS.query.epoch_interval)
+        current_epoch = int(time.time() // SETTINGS.managing.epoch_interval)
         redis_key = (
             f"rate_limits:consumed:{current_epoch}:{validator_hotkey}:{miner_hotkey}"
         )
@@ -131,7 +131,7 @@ class RateLimitManager:
         Returns:
             True if quota was successfully consumed, False otherwise
         """
-        current_epoch = int(time.time() // SETTINGS.query.epoch_interval)
+        current_epoch = int(time.time() // SETTINGS.managing.epoch_interval)
         consumed_key = (
             f"rate_limits:consumed:{current_epoch}:{validator_hotkey}:{miner_hotkey}"
         )
@@ -164,7 +164,7 @@ class RateLimitManager:
             # Begin transaction
             tr = self.redis.pipeline()
             tr.incr(consumed_key)
-            tr.expire(consumed_key, SETTINGS.query.epoch_interval * 2)
+            tr.expire(consumed_key, SETTINGS.managing.epoch_interval * 2)
             await tr.execute()
 
             logger.debug(
@@ -201,7 +201,7 @@ class RateLimitManager:
             logger.warning(f"Validator {validator_hotkey} has no quota allocation")
             return [1 for _ in miner_hotkeys]  # Default equal weights
 
-        current_epoch = int(time.time() // SETTINGS.query.epoch_interval)
+        current_epoch = int(time.time() // SETTINGS.managing.epoch_interval)
 
         # Prepare keys for all miners
         consumed_keys = [

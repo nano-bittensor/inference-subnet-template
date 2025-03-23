@@ -19,3 +19,10 @@ dependencies = [
     "substrate-interface>=1.7.11",
     "uvicorn>=0.34.0",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["inference_subnet"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

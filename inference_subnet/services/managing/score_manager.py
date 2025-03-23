@@ -24,13 +24,15 @@ class ScoreManager:
             scores: The new score values (typically 0.0 to 1.0)
         """
         current_time = time.time()
-        max_history = SETTINGS.query.n_historical_scores
+        max_history = SETTINGS.managing.n_historical_scores
 
         # Prepare pipeline for batch operations
         async with self.redis.pipeline() as pipe:
             # First, get all existing score histories
             history_keys = [
-                SETTINGS.query.redis_keys["scores_history"].format(miner_hotkey=hotkey)
+                SETTINGS.managing.redis_keys["scores_history"].format(
+                    miner_hotkey=hotkey
+                )
                 for hotkey in miner_hotkeys
             ]
             await pipe.mget(history_keys)
@@ -57,14 +59,14 @@ class ScoreManager:
                 # Calculate average score
                 avg_score = (
                     sum(entry["score"] for entry in scores_history)
-                    / SETTINGS.query.n_historical_scores
+                    / SETTINGS.managing.n_historical_scores
                 )
 
                 # Add commands to pipeline
-                history_key = SETTINGS.query.redis_keys["scores_history"].format(
+                history_key = SETTINGS.managing.redis_keys["scores_history"].format(
                     miner_hotkey=miner_hotkey
                 )
-                avg_key = SETTINGS.query.redis_keys["scores_average"].format(
+                avg_key = SETTINGS.managing.redis_keys["scores_average"].format(
                     miner_hotkey=miner_hotkey
                 )
 
@@ -72,9 +74,9 @@ class ScoreManager:
                 await pipe.set(history_key, json.dumps(scores_history))
                 await pipe.expire(
                     history_key,
-                    SETTINGS.query.epoch_interval
+                    SETTINGS.managing.epoch_interval
                     * max_history
-                    * SETTINGS.query.score_history_ttl_factor,
+                    * SETTINGS.managing.score_history_ttl_factor,
                 )
 
                 # Set average score
@@ -100,7 +102,7 @@ class ScoreManager:
         Returns:
             Average score (0.0 to 1.0)
         """
-        avg_key = SETTINGS.query.redis_keys["scores_average"].format(
+        avg_key = SETTINGS.managing.redis_keys["scores_average"].format(
             miner_hotkey=miner_hotkey
         )
         avg_score = await self.redis.get(avg_key)
@@ -124,7 +126,7 @@ class ScoreManager:
         Returns:
             List of score history entries with score and timestamp
         """
-        history_key = SETTINGS.query.redis_keys["scores_history"].format(
+        history_key = SETTINGS.managing.redis_keys["scores_history"].format(
             miner_hotkey=miner_hotkey
         )
         history_json = await self.redis.get(history_key)
@@ -144,7 +146,7 @@ class ScoreManager:
             Dictionary mapping miner hotkeys to their average scores
         """
         # Get all average score keys
-        key_pattern = SETTINGS.query.redis_keys["scores_average"].format(
+        key_pattern = SETTINGS.managing.redis_keys["scores_average"].format(
             miner_hotkey="*"
         )
         keys = await self.redis.keys(key_pattern)

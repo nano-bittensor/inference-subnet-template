@@ -39,7 +39,7 @@ class RedisSettings(BaseModel):
     db: int = 0
 
 
-class QuerySettings(BaseModel):
+class ManagingSettings(BaseModel):
     epoch_interval: int = 600
     n_scores_per_epoch: int = 4
     n_historical_scores: int = 10
@@ -54,6 +54,12 @@ class QuerySettings(BaseModel):
         "rate_limits_consumed": "rate_limits:consumed:{epoch}:{miner_hotkey}",
         "rate_limits_consumed_global": "rate_limits:consumed:{epoch}",
     }
+    host: str = "127.0.0.1"
+    port: int = 9002
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
 
     def get_current_epoch(self) -> int:
         return int(time.time() / self.epoch_interval)
@@ -63,7 +69,7 @@ class Settings(BaseSettings):
     substrate_sidecar: SubtensorSettings = SubtensorSettings()
     wallet: WalletSettings = WalletSettings()
     redis: RedisSettings = RedisSettings()
-    query: QuerySettings = QuerySettings()
+    managing: ManagingSettings = ManagingSettings()
 
     class Config:
         env_file = ".env"
