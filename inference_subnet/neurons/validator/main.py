@@ -4,7 +4,7 @@ from inference_subnet.settings import SETTINGS
 from inference_subnet.services.sidecar_subtensor.schemas import NodeInfoList
 from inference_subnet.services.managing.schemas import MinerSamplingResponse
 from inference_subnet.services.scoring.schemas import ScoreResponse
-
+from inference_subnet.verification import create_headers
 import time
 import json
 import asyncio
@@ -36,9 +36,7 @@ class ValidatorNeuron:
         self._node_infos_timestamp = 0
         self._cache_ttl = 600
 
-        self.scoring_semaphore = Semaphore(
-            SETTINGS.validating.scoring_semaphore_size
-        )
+        self.scoring_semaphore = Semaphore(SETTINGS.validating.scoring_semaphore_size)
 
         self.MAX_SCORES_PER_PERIOD = SETTINGS.validating.max_scores_per_period
         self.SCORE_PERIOD_SECONDS = SETTINGS.validating.score_period_seconds
@@ -72,8 +70,8 @@ class ValidatorNeuron:
 
     async def _get_challenge_payload(self):
         """Get challenge and payload for validation"""
-        challenge, payload_model, response_model = (
-            SETTINGS.validating.sample_challenge()
+        challenge_name, payload_model, response_model, api_route = (
+            SETTINGS.protocol.sample_challenge
         )
 
         async with AsyncClient(
@@ -82,11 +80,11 @@ class ValidatorNeuron:
         ) as client:
             response = await client.post(
                 "/api/get-payload",
-                json={"challenge": challenge},
+                json={"challenge": challenge_name},
             )
             payload = payload_model.model_validate_json(response.text)
 
-        return challenge, payload, response_model
+        return challenge_name, payload, response_model, api_route
 
     async def _get_miner_batch(self):
         """Get a batch of miners to validate"""
@@ -108,17 +106,21 @@ class ValidatorNeuron:
 
         return batch_info
 
-    async def _call_miner_forward(self, axon, payload, response_model):
+    async def _call_miner_forward(
+        self, axon, payload, response_model, api_route, miner_hotkey
+    ):
         """Call a miner's forward endpoint with the payload"""
-        endpoint = (
-            f"http://{axon['ip']}:{axon['port']}{SETTINGS.protocol.forward_route}"
-        )
-
+        endpoint = f"http://{axon['ip']}:{axon['port']}{api_route}"
+        headers = create_headers(self.keypair, miner_hotkey)
         async with AsyncClient(
             base_url=endpoint,
             timeout=SETTINGS.protocol.timeout,
         ) as client:
-            response = await client.post("/api/forward", json=payload.model_dump())
+            response = await client.post(
+                "/api/forward",
+                json=payload.model_dump(),
+                headers=headers,
+            )
             if response.status_code != 200:
                 logger.error(f"Failed to call forward: {response.text}")
                 return None
@@ -147,9 +149,7 @@ class ValidatorNeuron:
             return False
 
         await self.redis.zadd(tracking_key, {hotkey: now})
-        await self.redis.expire(
-            tracking_key, self.SCORE_PERIOD_SECONDS * 2
-        )
+        await self.redis.expire(tracking_key, self.SCORE_PERIOD_SECONDS * 2)
 
         await self.redis.zremrangebyscore(tracking_key, 0, cutoff_time)
 
@@ -171,14 +171,20 @@ class ValidatorNeuron:
 
     async def validate_batch(self):
         """Validate a batch of miners"""
-        _, payload, response_model = await self._get_challenge_payload()
+        challenge_name, payload, response_model, api_route = (
+            await self._get_challenge_payload()
+        )
+        logger.info(f"Challenge: {challenge_name}, Route: {api_route}")
         batch_info = await self._get_miner_batch()
 
         miner_hotkeys = batch_info.miner_hotkeys
         axons = batch_info.axons
 
         call_futures = [
-            self._call_miner_forward(axon, payload, response_model) for axon in axons
+            self._call_miner_forward(
+                axon, payload, response_model, api_route, miner_hotkey
+            )
+            for axon, miner_hotkey in zip(axons, miner_hotkeys)
         ]
         results = await asyncio.gather(*call_futures)
 

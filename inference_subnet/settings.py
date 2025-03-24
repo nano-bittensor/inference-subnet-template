@@ -9,6 +9,7 @@ from inference_subnet.protocol import (
     MultiplicationResponse,
 )
 import random
+from typing import Any
 
 
 class SubtensorSettings(BaseModel):
@@ -73,10 +74,6 @@ class ManagingSettings(BaseModel):
 
 
 class ValidatingSettings(BaseModel):
-    challenges: list[str] = [
-        "addiction",
-        "multiplication",
-    ]
     batch_size: int = 4
     synthetic_rate_limit_threshold: float = 0.3
     dropout_scoring_enabled: bool = True
@@ -85,19 +82,31 @@ class ValidatingSettings(BaseModel):
     score_tracking_key_prefix: str = "validator:score_tracking:"
     scoring_semaphore_size: int = 16
 
-    @property
-    def sample_challenge(self) -> tuple[str, BaseModel, BaseModel]:
-        challenge = random.choice(self.challenges)
-        if challenge == "addiction":
-            return challenge, AddictionPayload, AddictionResponse
-        elif challenge == "multiplication":
-            return challenge, MultiplicationPayload, MultiplicationResponse
-
 
 class ProtocolSettings(BaseModel):
-    forward_route: str = "/api/forward"
-    health_route: str = "/api/health"
+    challenges: dict[str, dict[str, Any]] = {
+        "addiction": {
+            "payload_model": AddictionPayload,
+            "response_model": AddictionResponse,
+            "api_route": "/api/add",
+        },
+        "multiplication": {
+            "payload_model": MultiplicationPayload,
+            "response_model": MultiplicationResponse,
+            "api_route": "/api/multiply",
+        },
+    }
     timeout: float = 12.0
+
+    @property
+    def sample_challenge(self) -> tuple[str, BaseModel, BaseModel]:
+        challenge = random.choice(list(self.challenges.keys()))
+        return (
+            challenge,
+            self.challenges[challenge]["payload_model"],
+            self.challenges[challenge]["response_model"],
+            self.challenges[challenge]["api_route"],
+        )
 
 
 class ScoringSettings(BaseModel):
@@ -126,6 +135,7 @@ class Settings(BaseSettings):
     validating: ValidatingSettings = ValidatingSettings()
     scoring: ScoringSettings = ScoringSettings()
     synthesizing: SynthesizingSettings = SynthesizingSettings()
+    protocol: ProtocolSettings = ProtocolSettings()
 
     class Config:
         env_file = ".env"
