@@ -50,6 +50,9 @@ class MinerSamplingResponse(BaseModel):
     uids: List[Optional[int]] = Field(
         ..., description="List of miner UIDs, if available"
     )
+    axons: List[Optional[dict]] = Field(
+        ..., description="List of miner axon information, if available"
+    )
 
 
 class ScoreEntry(BaseModel):

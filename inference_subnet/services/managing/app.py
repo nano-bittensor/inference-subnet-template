@@ -37,27 +37,43 @@ class ManagingService:
         self.setup_events()
 
     def setup_routes(self):
-        self.app.post("/api/consume", response_model=MinerSamplingResponse)(
-            self.consume
+        self.app.add_api_route(
+            "/api/consume",
+            self.consume,
+            methods=["POST"],
+            response_model=MinerSamplingResponse,
+            status_code=200,
+            tags=["consumption"],
+            description="Handle miner consumption rate limits and sampling",
         )
-        self.app.post("/api/update-score")(self.update_score)
-        self.app.get("/api/get-scores", response_model=ScoreResponse)(self.get_scores)
-        self.app.get("/api/health")(self.health_check)
+        self.app.add_api_route(
+            "/api/update-score",
+            self.update_score,
+            methods=["POST"],
+            status_code=200,
+            tags=["scoring"],
+            description="Update miner scores based on performance evaluations",
+        )
+        self.app.add_api_route(
+            "/api/get-scores",
+            self.get_scores,
+            methods=["GET"],
+            response_model=ScoreResponse,
+            status_code=200,
+            tags=["scoring"],
+            description="Retrieve current scores for all miners",
+        )
+        self.app.add_api_route(
+            "/api/health",
+            self.health_check,
+            methods=["GET"],
+            status_code=200,
+            tags=["health"],
+            description="Service health check endpoint",
+        )
 
     def setup_events(self):
         self.app.on_event("startup")(self.startup_event)
-
-    async def get_redis(self) -> Redis:
-        """Dependency to get Redis connection"""
-        return self.redis
-
-    async def get_rate_limit_manager(self) -> RateLimitManager:
-        """Dependency to get RateLimitManager instance"""
-        return self.rate_limit_manager
-
-    async def get_score_manager(self) -> ScoreManager:
-        """Dependency to get ScoreManager instance"""
-        return self.score_manager
 
     async def fetch_node_infos(self) -> NodeInfoList:
         """Fetch node information from the sidecar service with caching"""
@@ -120,121 +136,175 @@ class ManagingService:
     async def consume(
         self,
         request: ConsumeRequest,
-        rate_limit_manager: RateLimitManager = Depends(get_rate_limit_manager),
-        score_manager: ScoreManager = Depends(get_score_manager),
     ) -> Dict[str, Any]:
         """
         Consume rate limit for miners based on the specified strategy.
-
-        If miner_hotkey is provided, attempts to consume quota for the current validator accessing that miner.
-        Otherwise, samples miners based on their remaining capacity for this validator.
+        Coordinates consumption workflow through sub-functions.
         """
+        try:
+            if request.miner_hotkey:
+                return await self._handle_single_miner_consumption(request)
 
-        if request.miner_hotkey:
-            success = await rate_limit_manager.consume_validator_quota(
-                validator_hotkey=request.validator_hotkey,
-                miner_hotkey=request.miner_hotkey,
-                threshold=request.rate_limit_threshold,
+            node_infos = await self.fetch_node_infos()
+            all_hotkeys = self._get_valid_miner_hotkeys(node_infos)
+            top_miners = await self._select_top_miners(all_hotkeys, request.top_score)
+
+            sampling_weights = await self._calculate_sampling_weights(
+                request.validator_hotkey, top_miners
+            )
+            sampled_hotkeys = self._sample_miners(
+                top_miners, sampling_weights, request.sample_size
+            )
+            consumed_hotkeys = await self._consume_quotas_for_miners(
+                request.validator_hotkey, sampled_hotkeys, request.rate_limit_threshold
             )
 
-            if not success:
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Rate limit exceeded for validator {request.validator_hotkey} accessing miner {request.miner_hotkey}",
-                )
+            metadata = self._get_metadata_for_hotkeys(node_infos, consumed_hotkeys)
+            self._log_consumption_success(request.validator_hotkey, consumed_hotkeys)
 
-            logger.info(
-                f"Consumed quota for validator {request.validator_hotkey} accessing miner {request.miner_hotkey}"
-            )
-            return {"miner_hotkeys": [request.miner_hotkey], "uids": [None]}
+            return {"miner_hotkeys": consumed_hotkeys, **metadata}
+        except Exception as e:
+            logger.error(f"Failed to consume: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to consume: {str(e)}")
 
+    async def _handle_single_miner_consumption(
+        self, request: ConsumeRequest
+    ) -> Dict[str, Any]:
+        """Handle consumption for explicit miner hotkey case"""
+        success = await self.rate_limit_manager.consume_validator_quota(
+            validator_hotkey=request.validator_hotkey,
+            miner_hotkey=request.miner_hotkey,
+            threshold=request.rate_limit_threshold,
+        )
         node_infos = await self.fetch_node_infos()
-        all_hotkeys = [node.hotkey for node in node_infos.nodes]
+        metadata = self._get_metadata_for_hotkeys(node_infos, [request.miner_hotkey])
+        if not success:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded for validator {request.validator_hotkey} accessing miner {request.miner_hotkey}",
+            )
+        return {"miner_hotkeys": [request.miner_hotkey], **metadata}
 
-        if not all_hotkeys:
+    def _get_valid_miner_hotkeys(self, node_infos: NodeInfoList) -> list[str]:
+        """Validate and extract miner hotkeys from node info"""
+        if not node_infos.nodes:
             raise HTTPException(
                 status_code=404, detail="No miners available in the network"
             )
 
-        top_miners = []
-        if request.top_score < 1.0:
-            n_top_miners = int(len(all_hotkeys) * request.top_score)
-            logger.info(f"Sampling {n_top_miners} top miners")
-            scores = await score_manager.get_all_miner_scores()
-            scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-            top_miners = [hotkey for hotkey, _ in scores[:n_top_miners]]
-        else:
-            top_miners = all_hotkeys
-        logger.info(f"Top miners: {top_miners}")
+        all_hotkeys = [node.hotkey for node in node_infos.nodes]
+        if not all_hotkeys:
+            raise HTTPException(
+                status_code=404, detail="No miners available in the network"
+            )
+        return all_hotkeys
 
+    async def _select_top_miners(
+        self, all_hotkeys: list[str], top_score: float
+    ) -> list[str]:
+        """Select top miners based on scoring threshold"""
+        if top_score >= 1.0:
+            return all_hotkeys
+
+        n_top_miners = int(len(all_hotkeys) * top_score)
+        logger.info(f"Sampling {n_top_miners} top miners")
+        scores = await self.score_manager.get_all_miner_scores()
+        sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [hotkey for hotkey, _ in sorted_scores[:n_top_miners]]
+
+    async def _calculate_sampling_weights(
+        self, validator_hotkey: str, top_miners: list[str]
+    ) -> np.ndarray:
+        """Calculate weighted sampling distribution based on remaining capacities"""
         remaining_capacities = (
-            await rate_limit_manager.get_validators_remaining_capacity(
-                validator_hotkey=request.validator_hotkey, miner_hotkeys=top_miners
+            await self.rate_limit_manager.get_validators_remaining_capacity(
+                validator_hotkey=validator_hotkey, miner_hotkeys=top_miners
             )
         )
-
         total_capacity = sum(remaining_capacities)
         if total_capacity <= 0:
             raise HTTPException(
                 status_code=429,
                 detail="Validator has reached quota limits for all miners",
             )
-        sampling_weights = np.array(remaining_capacities) / total_capacity
+        return np.array(remaining_capacities) / total_capacity
 
+    def _sample_miners(
+        self, top_miners: list[str], sampling_weights: np.ndarray, sample_size: int
+    ) -> list[str]:
+        """Perform weighted random sampling of miners"""
         try:
             sampled_indices = np.random.choice(
                 len(top_miners),
-                size=min(request.sample_size, len(top_miners)),
+                size=min(sample_size, len(top_miners)),
                 replace=False,
                 p=sampling_weights,
             )
-            sampled_hotkeys = [top_miners[i] for i in sampled_indices]
+            return [top_miners[i] for i in sampled_indices]
         except ValueError as e:
             logger.error(f"Sampling error: {str(e)}")
             raise HTTPException(
                 status_code=500, detail=f"Failed to sample miners: {str(e)}"
             )
 
-        consumed_hotkeys = []
-        for hotkey in sampled_hotkeys:
-            success = await rate_limit_manager.consume_validator_quota(
-                validator_hotkey=request.validator_hotkey,
+    async def _consume_quotas_for_miners(
+        self, validator_hotkey: str, miner_hotkeys: list[str], threshold: float
+    ) -> list[str]:
+        """Attempt quota consumption for sampled miners"""
+        consumed = []
+        for hotkey in miner_hotkeys:
+            success = await self.rate_limit_manager.consume_validator_quota(
+                validator_hotkey=validator_hotkey,
                 miner_hotkey=hotkey,
-                threshold=request.rate_limit_threshold,
+                threshold=threshold,
             )
             if success:
-                consumed_hotkeys.append(hotkey)
-
-        if not consumed_hotkeys:
+                consumed.append(hotkey)
+        if not consumed:
             raise HTTPException(
                 status_code=429,
                 detail="Could not consume quota for any of the sampled miners",
             )
+        return consumed
 
-        uids = []
-        for hotkey in consumed_hotkeys:
+    def _get_metadata_for_hotkeys(
+        self, node_infos: NodeInfoList, hotkeys: list[str]
+    ) -> list[int]:
+        """Map miner hotkeys to their UIDs"""
+        metadata = {
+            "uids": [],
+            "axons": [],
+        }
+        for hotkey in hotkeys:
             try:
-                uid = node_infos.get_uid(hotkey)
-                uids.append(uid)
+                metadata["uids"].append(node_infos.get_uid(hotkey))
             except ValueError:
-                uids.append(None)
+                metadata["uids"].append(None)
+            try:
+                metadata["axons"].append(node_infos.get_axon(hotkey))
+            except ValueError:
+                metadata["axons"].append(None)
+        return metadata
 
+    def _log_consumption_success(
+        self, validator_hotkey: str, consumed_hotkeys: list[str]
+    ) -> None:
+        """Log successful consumption events"""
         logger.info(
-            f"Sampled and consumed quota for validator {request.validator_hotkey} accessing miners: {consumed_hotkeys}"
+            f"Sampled and consumed quota for validator {validator_hotkey} "
+            f"accessing miners: {consumed_hotkeys}"
         )
-        return {"miner_hotkeys": consumed_hotkeys, "uids": uids}
 
     async def update_score(
         self,
         request: UpdateScoreRequest,
-        score_manager: ScoreManager = Depends(get_score_manager),
     ) -> Dict[str, Any]:
         """
         Update the score for a miner based on evaluation results.
-        Stores historical scoring data for future use.
+        Simplified with direct manager access.
         """
         try:
-            await score_manager.update_miner_score(
+            await self.score_manager.update_miner_score(
                 miner_hotkeys=request.miner_hotkeys,
                 scores=request.scores,
             )
@@ -245,16 +315,13 @@ class ManagingService:
                 status_code=500, detail=f"Failed to update score: {str(e)}"
             )
 
-    async def get_scores(
-        self,
-        score_manager: ScoreManager = Depends(get_score_manager),
-    ) -> Dict[str, Any]:
+    async def get_scores(self) -> Dict[str, Any]:
         """
         Get the current scores for all miners.
-        Returns a dictionary mapping miner hotkeys to their current average scores.
+        Simplified with direct manager access.
         """
         try:
-            scores = await score_manager.get_all_miner_scores()
+            scores = await self.score_manager.get_all_miner_scores()
             return {"scores": scores}
         except Exception as e:
             logger.error(f"Failed to get scores: {str(e)}")

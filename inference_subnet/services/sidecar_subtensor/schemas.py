@@ -28,3 +28,10 @@ class NodeInfoList(BaseModel):
             if node.hotkey == hotkey_address:
                 return node.uid
         raise ValueError(f"Hotkey {hotkey_address} not found in metagraph")
+
+    def get_axon(self, hotkey_address: str) -> str:
+        """Return http://ip:port for a given hotkey address."""
+        for node in self.nodes:
+            if node.hotkey == hotkey_address:
+                return f"http://{node.ip}:{node.port}"
+        raise ValueError(f"Hotkey {hotkey_address} not found in metagraph")

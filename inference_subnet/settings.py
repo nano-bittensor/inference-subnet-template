@@ -2,6 +2,13 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 import time
 import os
+from inference_subnet.protocol import (
+    AddictionPayload,
+    AddictionResponse,
+    MultiplicationPayload,
+    MultiplicationResponse,
+)
+import random
 
 
 class SubtensorSettings(BaseModel):
@@ -65,11 +72,60 @@ class ManagingSettings(BaseModel):
         return int(time.time() / self.epoch_interval)
 
 
+class ValidatingSettings(BaseModel):
+    challenges: list[str] = [
+        "addiction",
+        "multiplication",
+    ]
+    batch_size: int = 4
+    synthetic_rate_limit_threshold: float = 0.3
+    dropout_scoring_enabled: bool = True
+    max_scores_per_period: int = 4
+    score_period_seconds: int = 600
+    score_tracking_key_prefix: str = "validator:score_tracking:"
+    scoring_semaphore_size: int = 16
+
+    @property
+    def sample_challenge(self) -> tuple[str, BaseModel, BaseModel]:
+        challenge = random.choice(self.challenges)
+        if challenge == "addiction":
+            return challenge, AddictionPayload, AddictionResponse
+        elif challenge == "multiplication":
+            return challenge, MultiplicationPayload, MultiplicationResponse
+
+
+class ProtocolSettings(BaseModel):
+    forward_route: str = "/api/forward"
+    health_route: str = "/api/health"
+    timeout: float = 12.0
+
+
+class ScoringSettings(BaseModel):
+    host: str = "127.0.0.1"
+    port: int = 9003
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+
+class SynthesizingSettings(BaseModel):
+    host: str = "127.0.0.1"
+    port: int = 9004
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+
 class Settings(BaseSettings):
     substrate_sidecar: SubtensorSettings = SubtensorSettings()
     wallet: WalletSettings = WalletSettings()
     redis: RedisSettings = RedisSettings()
     managing: ManagingSettings = ManagingSettings()
+    validating: ValidatingSettings = ValidatingSettings()
+    scoring: ScoringSettings = ScoringSettings()
+    synthesizing: SynthesizingSettings = SynthesizingSettings()
 
     class Config:
         env_file = ".env"

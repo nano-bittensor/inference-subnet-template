@@ -31,9 +31,31 @@ class SidecarSubtensorService:
         self.setup_events()
 
     def setup_routes(self):
-        self.app.get("/api/nodes", response_model=NodeInfoList)(self.get_nodes)
-        self.app.get("/api/status")(self.get_node_status)
-        self.app.get("/api/health")(self.health_check)
+        self.app.add_api_route(
+            "/api/nodes",
+            self.get_nodes,
+            methods=["GET"],
+            response_model=NodeInfoList,
+            status_code=200,
+            tags=["nodes"],
+            description="Get the current list of validator nodes in the metagraph.",
+        )
+        self.app.add_api_route(
+            "/api/status",
+            self.get_node_status,
+            methods=["GET"],
+            status_code=200,
+            tags=["status"],
+            description="Get basic information about this node.",
+        )
+        self.app.add_api_route(
+            "/api/health",
+            self.health_check,
+            methods=["GET"],
+            status_code=200,
+            tags=["health"],
+            description="Simple health check endpoint",
+        )
 
     def setup_events(self):
         self.app.on_event("startup")(self.startup_event)
@@ -135,12 +157,12 @@ class SidecarSubtensorService:
             address = address[0]
         return ss58_encode(bytes(address).hex(), 42)
 
-    async def get_nodes(self, redis: Redis = Depends(get_redis)) -> NodeInfoList:
+    async def get_nodes(self) -> NodeInfoList:
         """Retrieve the current list of validator nodes in the metagraph."""
         redis_key = SETTINGS.substrate_sidecar.redis_keys["node_infos"].format(
             netuid=SETTINGS.substrate_sidecar.netuid
         )
-        cached_node_info = await redis.get(redis_key)
+        cached_node_info = await self.redis.get(redis_key)
 
         if not cached_node_info:
             raise HTTPException(
@@ -158,18 +180,18 @@ class SidecarSubtensorService:
             return {
                 "ss58_address": self.keypair.ss58_address,
                 "uid": node_uid,
+                "status": "registered" if node_uid is not None else "unregistered",
             }
-        except ValueError:
+        except HTTPException as e:
             return {
                 "ss58_address": self.keypair.ss58_address,
-                "uid": None,
-                "status": "not_registered",
+                "status": "error",
+                "error": e.detail,
             }
         except Exception as e:
             logger.error(f"Error getting node status: {str(e)}")
             return {
                 "ss58_address": self.keypair.ss58_address,
-                "uid": None,
                 "status": "error",
                 "error": str(e),
             }
